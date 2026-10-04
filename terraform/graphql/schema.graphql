@@ -1,0 +1,69 @@
+# Initial CMS-facing schema. It is a view for the CMS, not a mirror of the backend domain model.
+# Every Query/Mutation field is resolved by the BFF Lambda (see bff_resolver_fields in api.tf).
+
+enum SourceType {
+  RSS
+  ATOM
+}
+
+type Source {
+  id: ID!
+  name: String!
+  type: SourceType!
+  endpoint: AWSURL!
+}
+
+type Article {
+  id: ID!
+  title: String!
+  url: AWSURL!
+  publishedAt: AWSDateTime
+}
+
+type EpisodeSummary {
+  id: ID!
+  date: AWSDate!
+}
+
+type Episode {
+  id: ID!
+  date: AWSDate!
+  script: String!
+  audioUrl: AWSURL
+  articles: [Article!]!
+}
+
+type EpisodeConnection {
+  items: [EpisodeSummary!]!
+  nextToken: String
+}
+
+input CreateSourceInput {
+  name: String!
+  type: SourceType!
+  endpoint: AWSURL!
+}
+
+input UpdateSourceInput {
+  id: ID!
+  name: String
+  type: SourceType
+  endpoint: AWSURL
+}
+
+type Query {
+  sources: [Source!]!
+  episodes(limit: Int, nextToken: String): EpisodeConnection!
+  episode(id: ID!): Episode
+}
+
+type Mutation {
+  createSource(input: CreateSourceInput!): Source!
+  updateSource(input: UpdateSourceInput!): Source!
+  deleteSource(id: ID!): ID!
+}
+
+schema {
+  query: Query
+  mutation: Mutation
+}
