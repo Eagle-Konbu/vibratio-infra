@@ -11,18 +11,26 @@ EventBridge Scheduler (daily, Asia/Tokyo)
     ↓
 Batch Lambda ──→ SSM Parameter Store (LLM / TTS / Discord credentials)
     │   │   └──→ Discord (audio URL)
-    │   └──→ S3 data bucket (articles / episodes / audio) ──→ CloudFront (audio/ only)
+    │   └──→ S3 data bucket (articles / episodes / audio) ──→ CloudFront (audio/ only) ← audio.vibratio.cl17.dev
     ↓
 DynamoDB config table (Sources, ...)
     ↑
-AppSync GraphQL API (JS resolvers) ←── Cognito User Pool (sign-in)
+AppSync GraphQL API (JS resolvers) ← api.vibratio.cl17.dev ←── Cognito User Pool (sign-in)
     ↑
-CMS (Vite + React) ←── CloudFront ←── S3 CMS bucket
+CMS (Vite + React) ←── CloudFront ← cms.vibratio.cl17.dev ←── S3 CMS bucket
 ```
 
 The batch collects articles, generates the script and the audio with external AI APIs, stores them in S3 and posts the audio URL to Discord. The URL points to a CloudFront distribution that exposes only `audio/`. The CMS only edits settings, which AppSync reads and writes in DynamoDB without any Lambda function in between.
 
 All logs go to CloudWatch Logs with a fixed retention period.
+
+Every public endpoint has a custom domain under `vibratio.cl17.dev`, whose DNS is hosted on Cloudflare:
+
+| Domain | Target |
+| --- | --- |
+| `cms.vibratio.cl17.dev` | CMS CloudFront distribution |
+| `audio.vibratio.cl17.dev` | Audio CloudFront distribution |
+| `api.vibratio.cl17.dev` | AppSync custom domain (`https://api.vibratio.cl17.dev/graphql`) |
 
 ## Directory Layout
 
@@ -38,11 +46,11 @@ terraform/
 ├── config.tf          # DynamoDB table for settings edited from the CMS
 ├── secrets.tf         # SSM SecureString parameters for external APIs
 ├── batch.tf           # Batch Lambda, EventBridge Scheduler, related IAM
-├── api.tf             # AppSync API, DynamoDB data source, resolvers, related IAM
+├── api.tf             # AppSync API, custom domain, DynamoDB data source, resolvers, related IAM
 ├── audio_delivery.tf  # CloudFront for audio/ in the data bucket
 ├── auth.tf            # Cognito User Pool and CMS app client
 ├── cms_hosting.tf     # S3 + CloudFront for the CMS
-├── domain.tf          # ACM wildcard certificate for the custom domains (us-east-1)
+├── domain.tf          # Custom domain names and their ACM wildcard certificate (us-east-1)
 ├── outputs.tf         # Values consumed by backend/CMS deployments
 └── graphql/
     ├── schema.graphql # CMS-facing GraphQL schema
@@ -78,7 +86,7 @@ The CMS is a static SPA. It signs in with Cognito (SRP, no hosted UI) and calls 
 
 | Output | Usage |
 | --- | --- |
-| `graphql_api_url` | AppSync endpoint |
+| `graphql_api_url` | AppSync endpoint on the custom domain |
 | `cognito_user_pool_id` | Cognito user pool |
 | `cognito_user_pool_client_id` | Cognito app client |
 
@@ -149,7 +157,7 @@ The prefixes map one-to-one to the backend domain model, and IAM policies are sc
 - **AppSync JS resolvers instead of a BFF Lambda.** The CMS only performs CRUD on settings, so resolvers map GraphQL fields to DynamoDB operations directly. Type and URL checks come from the schema (`AWSURL`, enums). If validation grows beyond what a resolver should do, a Lambda data source can be added for those fields.
 - **Cognito without self sign-up.** The CMS is for personal use; users are created by an administrator. TOTP MFA is available as an option.
 - **Audio is delivered as a public CloudFront URL.** The batch posts the URL to Discord, and Discord messages remain, so the URL must not expire; presigned URLs expire within hours when signed with Lambda role credentials. CloudFront reads only `audio/` through origin access control, and unguessable object keys keep the files from being enumerated. If the files must be restricted, CloudFront signed URLs with a long expiry can be added later. The CMS and the API have no access to the data bucket.
-- **Custom domains under `vibratio.cl17.dev` with DNS on Cloudflare.** One wildcard ACM certificate (`*.vibratio.cl17.dev`) in `us-east-1`, as CloudFront and AppSync require, covers `cms`, `audio` and `api`. DNS is not moved to Route 53, so the validation records are added to Cloudflare by hand. Terraform does not wait for validation (`aws_acm_certificate_validation`) or attach the certificate until it is issued, because CI would otherwise block until the records exist and time out.
+- **Custom domains under `vibratio.cl17.dev` with DNS on Cloudflare.** One wildcard ACM certificate (`*.vibratio.cl17.dev`) in `us-east-1`, as CloudFront and AppSync require, covers `cms`, `audio` and `api`. DNS is not moved to Route 53, so the validation and service records are added to Cloudflare by hand. The custom domains reference the certificate through `aws_acm_certificate_validation`, so they are configured only after the certificate is issued. The records are DNS only: proxying through Cloudflare would put a second CDN in front of CloudFront, doubling cache and TLS handling, and Cloudflare's Flexible SSL mode would cause a redirect loop.
 
 ## Deployment
 
@@ -225,6 +233,16 @@ tflint
 terraform providers lock -platform=linux_amd64 -platform=darwin_arm64
 ```
 
+### First Apply
+
+The custom domains wait for the ACM certificate to be issued, which in turn needs the validation records in Cloudflare (see step 3 below). On a fresh setup, the apply job therefore blocks on `aws_acm_certificate_validation` until the records exist. Add them while it waits, reading them from ACM because the Terraform outputs are not written yet:
+
+```sh
+aws acm describe-certificate --region us-east-1 \
+  --certificate-arn "$(aws acm list-certificates --region us-east-1 --query "CertificateSummaryList[?DomainName=='*.vibratio.cl17.dev'].CertificateArn" --output text)" \
+  --query "Certificate.DomainValidationOptions[].ResourceRecord"
+```
+
 ### After the First Apply
 
 1. Set the external API credentials and the Discord webhook URL (`batch_secret_parameter_names` output):
@@ -261,7 +279,19 @@ terraform providers lock -platform=linux_amd64 -platform=darwin_arm64
    AWS_REGION=us-east-1 aws acm list-certificates --query "CertificateSummaryList[?DomainName=='*.vibratio.cl17.dev']"
    ```
 
-4. Deploy the backend Lambda code and the CMS as described in [Boundaries](#boundaries).
+4. Point the custom domains to AWS by adding the records from `custom_domain_dns_records` to Cloudflare, also as **DNS only** CNAMEs:
+
+   ```sh
+   terraform -chdir=terraform output custom_domain_dns_records
+   ```
+
+   | Name | Target |
+   | --- | --- |
+   | `cms.vibratio` | CMS distribution (`<id>.cloudfront.net`) |
+   | `audio.vibratio` | Audio distribution (`<id>.cloudfront.net`) |
+   | `api.vibratio` | AppSync custom domain (`<id>.cloudfront.net`) |
+
+5. Deploy the backend Lambda code and the CMS as described in [Boundaries](#boundaries).
 
 ## Operations
 

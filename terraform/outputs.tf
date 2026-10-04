@@ -5,7 +5,7 @@ output "data_bucket_name" {
 
 output "audio_base_url" {
   description = "Public base URL of the audio/ prefix, used for the links posted to Discord."
-  value       = "https://${aws_cloudfront_distribution.audio.domain_name}"
+  value       = local.audio_base_url
 }
 
 output "config_table_name" {
@@ -25,7 +25,7 @@ output "batch_secret_parameter_names" {
 
 output "graphql_api_url" {
   description = "AppSync GraphQL endpoint used by the CMS."
-  value       = aws_appsync_graphql_api.cms.uris["GRAPHQL"]
+  value       = "https://${aws_appsync_domain_name_api_association.cms.domain_name}/graphql"
 }
 
 output "cognito_user_pool_id" {
@@ -50,7 +50,7 @@ output "cms_distribution_id" {
 
 output "cms_url" {
   description = "URL of the CMS."
-  value       = "https://${aws_cloudfront_distribution.cms.domain_name}"
+  value       = "https://${local.cms_domain_name}"
 }
 
 output "acm_validation_records" {
@@ -61,5 +61,26 @@ output "acm_validation_records" {
       type  = option.resource_record_type
       value = option.resource_record_value
     }
+  ]
+}
+
+output "custom_domain_dns_records" {
+  description = "CNAME records to add to Cloudflare (DNS only) that point the custom domains to CloudFront and AppSync."
+  value = [
+    {
+      name  = local.cms_domain_name
+      type  = "CNAME"
+      value = aws_cloudfront_distribution.cms.domain_name
+    },
+    {
+      name  = local.audio_domain_name
+      type  = "CNAME"
+      value = aws_cloudfront_distribution.audio.domain_name
+    },
+    {
+      name  = local.api_domain_name
+      type  = "CNAME"
+      value = aws_appsync_domain_name.cms.appsync_domain_name
+    },
   ]
 }

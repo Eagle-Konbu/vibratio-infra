@@ -108,3 +108,14 @@ data "aws_iam_policy_document" "appsync" {
     resources = ["${aws_cloudwatch_log_group.appsync.arn}:*"]
   }
 }
+
+# The certificate is in us-east-1 while the domain is created in the API's region, as AppSync requires.
+resource "aws_appsync_domain_name" "cms" {
+  domain_name     = local.api_domain_name
+  certificate_arn = aws_acm_certificate_validation.wildcard.certificate_arn
+}
+
+resource "aws_appsync_domain_name_api_association" "cms" {
+  api_id      = aws_appsync_graphql_api.cms.id
+  domain_name = aws_appsync_domain_name.cms.domain_name
+}
