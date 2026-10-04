@@ -1,11 +1,9 @@
 locals {
   # Key layout shared with vibratio-backend. IAM policies are scoped by these prefixes.
   data_prefixes = {
-    sources  = "sources/"
     articles = "articles/"
     episodes = "episodes/"
     audio    = "audio/"
-    config   = "config/"
   }
 }
 
@@ -30,8 +28,8 @@ resource "aws_s3_bucket_ownership_controls" "data" {
   }
 }
 
-# Without a database, this bucket is the only copy of Sources edited from the CMS,
-# so versioning protects against accidental overwrites and deletes.
+# Regenerating Episodes and Audio calls the paid LLM and TTS APIs again,
+# so versioning protects them against accidental overwrites and deletes.
 resource "aws_s3_bucket_versioning" "data" {
   bucket = aws_s3_bucket.data.id
 

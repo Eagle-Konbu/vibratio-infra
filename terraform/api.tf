@@ -1,16 +1,14 @@
 locals {
-  bff_function_name = "${var.project_name}-bff"
+  resolver_dir = "${path.module}/graphql/resolvers"
 
-  bff_resolver_fields = {
-    Query    = ["sources", "episodes", "episode"]
-    Mutation = ["createSource", "updateSource", "deleteSource"]
-  }
-
-  bff_resolvers = merge([
-    for type, fields in local.bff_resolver_fields : {
-      for field in fields : "${type}.${field}" => { type = type, field = field }
+  # One APPSYNC_JS resolver per file, named "<Type>.<field>.js".
+  resolvers = {
+    for file in fileset(local.resolver_dir, "*.js") : trimsuffix(file, ".js") => {
+      type  = split(".", file)[0]
+      field = split(".", file)[1]
+      code  = file("${local.resolver_dir}/${file}")
     }
-  ]...)
+  }
 }
 
 resource "aws_appsync_graphql_api" "cms" {
@@ -35,26 +33,32 @@ resource "aws_cloudwatch_log_group" "appsync" {
   retention_in_days = var.log_retention_days
 }
 
-resource "aws_appsync_datasource" "bff" {
+resource "aws_appsync_datasource" "config" {
   api_id           = aws_appsync_graphql_api.cms.id
-  name             = "bff"
-  type             = "AWS_LAMBDA"
+  name             = "config"
+  type             = "AMAZON_DYNAMODB"
   service_role_arn = aws_iam_role.appsync.arn
 
-  lambda_config {
-    function_arn = aws_lambda_function.bff.arn
+  dynamodb_config {
+    table_name = aws_dynamodb_table.config.name
+    region     = var.aws_region
   }
 }
 
-# Direct Lambda resolvers: no mapping templates, the BFF receives the full AppSync event.
-resource "aws_appsync_resolver" "bff" {
-  for_each = local.bff_resolvers
+resource "aws_appsync_resolver" "config" {
+  for_each = local.resolvers
 
   api_id      = aws_appsync_graphql_api.cms.id
   type        = each.value.type
   field       = each.value.field
-  data_source = aws_appsync_datasource.bff.name
+  data_source = aws_appsync_datasource.config.name
   kind        = "UNIT"
+  code        = each.value.code
+
+  runtime {
+    name            = "APPSYNC_JS"
+    runtime_version = "1.0.0"
+  }
 }
 
 resource "aws_iam_role" "appsync" {
@@ -87,98 +91,20 @@ resource "aws_iam_role_policy" "appsync" {
 
 data "aws_iam_policy_document" "appsync" {
   statement {
-    sid       = "InvokeBff"
-    actions   = ["lambda:InvokeFunction"]
-    resources = [aws_lambda_function.bff.arn]
+    sid = "ManageConfig"
+    actions = [
+      "dynamodb:Query",
+      "dynamodb:GetItem",
+      "dynamodb:PutItem",
+      "dynamodb:UpdateItem",
+      "dynamodb:DeleteItem",
+    ]
+    resources = [aws_dynamodb_table.config.arn]
   }
 
   statement {
     sid       = "WriteLogs"
     actions   = ["logs:CreateLogStream", "logs:PutLogEvents"]
     resources = ["${aws_cloudwatch_log_group.appsync.arn}:*"]
-  }
-}
-
-resource "aws_lambda_function" "bff" {
-  function_name = local.bff_function_name
-  role          = aws_iam_role.bff.arn
-  runtime       = "provided.al2023"
-  architectures = ["arm64"]
-  handler       = "bootstrap"
-  timeout       = 10
-  memory_size   = 256
-
-  filename         = data.archive_file.lambda_placeholder.output_path
-  source_code_hash = data.archive_file.lambda_placeholder.output_base64sha256
-
-  environment {
-    variables = {
-      DATA_BUCKET_NAME = aws_s3_bucket.data.bucket
-    }
-  }
-
-  logging_config {
-    log_format = "Text"
-    log_group  = aws_cloudwatch_log_group.bff.name
-  }
-
-  lifecycle {
-    ignore_changes = [filename, source_code_hash]
-  }
-}
-
-resource "aws_cloudwatch_log_group" "bff" {
-  name              = "/aws/lambda/${local.bff_function_name}"
-  retention_in_days = var.log_retention_days
-}
-
-resource "aws_iam_role" "bff" {
-  name               = "${local.bff_function_name}-lambda"
-  assume_role_policy = data.aws_iam_policy_document.lambda_assume_role.json
-}
-
-resource "aws_iam_role_policy" "bff" {
-  name   = "bff"
-  role   = aws_iam_role.bff.id
-  policy = data.aws_iam_policy_document.bff.json
-}
-
-data "aws_iam_policy_document" "bff" {
-  statement {
-    sid       = "WriteLogs"
-    actions   = ["logs:CreateLogStream", "logs:PutLogEvents"]
-    resources = ["${aws_cloudwatch_log_group.bff.arn}:*"]
-  }
-
-  statement {
-    sid       = "ListData"
-    actions   = ["s3:ListBucket"]
-    resources = [aws_s3_bucket.data.arn]
-
-    condition {
-      test     = "StringLike"
-      variable = "s3:prefix"
-      values = [
-        "${local.data_prefixes.sources}*",
-        "${local.data_prefixes.episodes}*",
-      ]
-    }
-  }
-
-  statement {
-    sid       = "ManageSources"
-    actions   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
-    resources = ["${aws_s3_bucket.data.arn}/${local.data_prefixes.sources}*"]
-  }
-
-  # Audio read access is required to sign presigned URLs that the CMS uses for playback.
-  statement {
-    sid     = "ReadEpisodes"
-    actions = ["s3:GetObject"]
-    resources = [
-      "${aws_s3_bucket.data.arn}/${local.data_prefixes.episodes}*",
-      "${aws_s3_bucket.data.arn}/${local.data_prefixes.articles}*",
-      "${aws_s3_bucket.data.arn}/${local.data_prefixes.audio}*",
-    ]
   }
 }

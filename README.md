@@ -9,16 +9,18 @@ vibratio runs a batch once a day for a single user, so the infrastructure is ful
 ```text
 EventBridge Scheduler (daily, Asia/Tokyo)
     ↓
-Batch Lambda ──→ SSM Parameter Store (external API credentials)
+Batch Lambda ──→ SSM Parameter Store (LLM / TTS / Discord credentials)
+    │   │   └──→ Discord (audio URL)
+    │   └──→ S3 data bucket (articles / episodes / audio) ──→ CloudFront (audio/ only)
     ↓
-S3 data bucket (sources / articles / episodes / audio / config)
+DynamoDB config table (Sources, ...)
     ↑
-BFF Lambda
-    ↑
-AppSync GraphQL API ←── Cognito User Pool (sign-in)
+AppSync GraphQL API (JS resolvers) ←── Cognito User Pool (sign-in)
     ↑
 CMS (Vite + React) ←── CloudFront ←── S3 CMS bucket
 ```
+
+The batch collects articles, generates the script and the audio with external AI APIs, stores them in S3 and posts the audio URL to Discord. The URL points to a CloudFront distribution that exposes only `audio/`. The CMS only edits settings, which AppSync reads and writes in DynamoDB without any Lambda function in between.
 
 All logs go to CloudWatch Logs with a fixed retention period.
 
@@ -30,14 +32,17 @@ terraform/
 ├── variables.tf       # Tunable settings (region, schedule, retention, ...)
 ├── main.tf            # Shared data sources and the Lambda placeholder package
 ├── storage.tf         # S3 data bucket and its key prefixes
+├── config.tf          # DynamoDB table for settings edited from the CMS
 ├── secrets.tf         # SSM SecureString parameters for external APIs
 ├── batch.tf           # Batch Lambda, EventBridge Scheduler, related IAM
-├── api.tf             # AppSync API, BFF Lambda, resolvers, related IAM
+├── api.tf             # AppSync API, DynamoDB data source, resolvers, related IAM
+├── audio_delivery.tf  # CloudFront for audio/ in the data bucket
 ├── auth.tf            # Cognito User Pool and CMS app client
 ├── cms_hosting.tf     # S3 + CloudFront for the CMS
 ├── outputs.tf         # Values consumed by backend/CMS deployments
 └── graphql/
-    └── schema.graphql # CMS-facing GraphQL schema
+    ├── schema.graphql # CMS-facing GraphQL schema
+    └── resolvers/     # APPSYNC_JS resolvers, one file per field
 ```
 
 There is a single root module and a single environment. Files are split by component instead of Terraform modules, and IAM is defined next to the resource that uses it.
@@ -46,19 +51,19 @@ There is a single root module and a single environment. Files are split by compo
 
 ### Backend (`vibratio-backend`)
 
-The backend repository owns the code of two Lambda functions. Both use the `provided.al2023` runtime on `arm64` and expect a Go binary named `bootstrap`.
+The backend repository owns the code of the batch Lambda function. It uses the `provided.al2023` runtime on `arm64` and expects a Go binary named `bootstrap`.
 
 | Function | Trigger | Environment variables |
 | --- | --- | --- |
-| `vibratio-batch` | EventBridge Scheduler, once a day | `DATA_BUCKET_NAME`, `SECRETS_PARAMETER_PATH` |
-| `vibratio-bff` | AppSync direct Lambda resolver | `DATA_BUCKET_NAME` |
+| `vibratio-batch` | EventBridge Scheduler, once a day | `AUDIO_BASE_URL`, `CONFIG_TABLE_NAME`, `DATA_BUCKET_NAME`, `SECRETS_PARAMETER_PATH` |
 
-Terraform creates the functions with a placeholder package and ignores later code changes, so function code is deployed independently:
+Terraform creates the function with a placeholder package and ignores later code changes, so function code is deployed independently:
 
 ```sh
 aws lambda update-function-code --function-name vibratio-batch --zip-file fileb://batch.zip
-aws lambda update-function-code --function-name vibratio-bff --zip-file fileb://bff.zip
 ```
+
+The URL posted to Discord for an audio object `audio/<key>` is `${AUDIO_BASE_URL}/audio/<key>`. Anyone with the URL can download the file, so `<key>` must contain an unguessable part such as a UUID. Set `Content-Type` (e.g. `audio/mpeg`) on upload so that the file plays in the browser.
 
 Runtime settings (memory, timeout, environment variables, IAM) stay in Terraform.
 
@@ -81,33 +86,52 @@ aws s3 sync dist "s3://$(terraform output -raw cms_bucket_name)" --delete
 aws cloudfront create-invalidation --distribution-id "$(terraform output -raw cms_distribution_id)" --paths "/*"
 ```
 
-### GraphQL Schema
+### GraphQL API
 
-`terraform/graphql/schema.graphql` is the initial CMS-facing schema. AppSync is deployed by Terraform, so the schema lives here. When a field is added to `Query` or `Mutation`, add it to `bff_resolver_fields` in `api.tf` as well.
+`terraform/graphql/schema.graphql` is the CMS-facing schema, and `terraform/graphql/resolvers/<Type>.<field>.js` resolves each `Query` and `Mutation` field against the config table. Terraform registers every file in `resolvers/` as a resolver, so adding a field means adding it to the schema and adding its resolver file.
 
-## S3 Data Model
+Resolvers are plain JavaScript files deployed as they are, with no build step. They run on the APPSYNC_JS runtime, which supports only a subset of JavaScript (no `try`/`catch`, classes, `while` loops, ...), and can be checked on that runtime without deploying them:
 
-Everything the system persists lives in one bucket, `vibratio-data-<account-id>`. There is no database in the MVP.
+```sh
+aws appsync evaluate-code --runtime name=APPSYNC_JS,runtimeVersion=1.0.0 \
+  --code file://graphql/resolvers/Query.sources.js --function request --context '{}'
+```
 
-| Prefix | Content | Batch | BFF |
-| --- | --- | --- | --- |
-| `sources/` | `Source` (one object per source) | read | read / write / delete |
-| `articles/` | `Article` collected from sources | read / write | read |
-| `episodes/` | `Episode` including its `Script` | read / write | read |
-| `audio/` | `Audio` generated by TTS | write | read (presigned URLs) |
-| `config/` | Application settings | read | — |
+## Data Model
+
+### DynamoDB Config Table
+
+`vibratio-config` stores the settings edited from the CMS. AppSync reads and writes it; the batch only reads it.
+
+| `pk` | `sk` | Attributes |
+| --- | --- | --- |
+| `SOURCE` | Source ID (UUID) | `name`, `type`, `endpoint`, `createdAt`, `updatedAt` |
+
+Each kind of setting gets its own partition key, so the batch and the CMS read all items of a kind with one `Query`. Single-item settings can use a fixed sort key such as `pk = SETTINGS`, `sk = default`.
+
+### S3 Data Bucket
+
+Data generated by the batch lives in `vibratio-data-<account-id>`.
+
+| Prefix | Content | Batch |
+| --- | --- | --- |
+| `articles/` | `Article` collected from sources | read / write |
+| `episodes/` | `Episode` including its `Script` | read / write |
+| `audio/` | `Audio` generated by TTS | write |
+
+`audio/` is also readable through the audio CloudFront distribution (bucket policy restricted to that distribution); the other prefixes are not.
 
 The prefixes map one-to-one to the backend domain model, and IAM policies are scoped by them. Object keys below each prefix and their formats are defined by the backend domain design. For example, sortable Episode IDs such as dates make `ListObjectsV2` on `episodes/` return episodes in order.
 
 ## Design Decisions
 
-- **No database.** The data volume is a handful of objects per day, so S3 alone is enough. Versioning is enabled because the bucket is the only copy of the Sources edited from the CMS; noncurrent versions expire after 30 days.
+- **Settings in DynamoDB, generated data in S3.** Settings are small records edited one at a time, which fits DynamoDB (conditional writes, `Query` instead of list-then-get). Articles, episodes and audio are written once a day and audio is large, which fits S3. The config table has point-in-time recovery and deletion protection because it is the only copy of the settings. The data bucket is versioned because regenerating episodes calls paid APIs again; noncurrent versions expire after 30 days.
 - **Lambda code is deployed outside Terraform.** Terraform owns the function configuration, the backend CI owns the code. This keeps application releases independent from infrastructure changes.
 - **No automatic retry of the batch.** Retries would call the paid LLM and TTS APIs again, so a failed run is re-executed manually (see Operations).
 - **SSM Parameter Store instead of Secrets Manager.** Standard SecureString parameters are free and rotation is not needed. Terraform creates the parameters with a placeholder value and ignores the value afterwards, so real credentials never enter the Terraform state.
-- **AppSync with direct Lambda resolvers.** All business logic stays in the BFF Lambda, and AppSync only provides the GraphQL endpoint and Cognito authorization.
+- **AppSync JS resolvers instead of a BFF Lambda.** The CMS only performs CRUD on settings, so resolvers map GraphQL fields to DynamoDB operations directly. Type and URL checks come from the schema (`AWSURL`, enums). If validation grows beyond what a resolver should do, a Lambda data source can be added for those fields.
 - **Cognito without self sign-up.** The CMS is for personal use; users are created by an administrator. TOTP MFA is available as an option.
-- **Audio playback through presigned URLs.** Both buckets are private. The BFF signs short-lived URLs for audio objects instead of exposing the data bucket through CloudFront.
+- **Audio is delivered as a public CloudFront URL.** The batch posts the URL to Discord, and Discord messages remain, so the URL must not expire; presigned URLs expire within hours when signed with Lambda role credentials. CloudFront reads only `audio/` through origin access control, and unguessable object keys keep the files from being enumerated. If the files must be restricted, CloudFront signed URLs with a long expiry can be added later. The CMS and the API have no access to the data bucket.
 - **CloudFront default domain.** A custom domain can be added later with an ACM certificate in `us-east-1`.
 
 ## Deployment
@@ -134,10 +158,12 @@ The GitHub Actions roles are also created by hand, using the existing `token.act
 
 | Role | Trust condition (`token.actions.githubusercontent.com:sub`, `StringLike`) | Permissions |
 | --- | --- | --- |
-| `vibratio-github-actions-plan` | `repo:Eagle-Konbu/vibratio-infra:pull_request` | `ReadOnlyAccess`, plus `s3:PutObject` / `s3:DeleteObject` on `vibratio/terraform.tfstate.tflock` in the state bucket |
-| `vibratio-github-actions-apply` | `repo:Eagle-Konbu/vibratio-infra:ref:refs/tags/v*` | `AdministratorAccess` |
+| `vibratio-github-actions-plan` | `repo:Eagle-Konbu@13817030/vibratio-infra@1401080650:pull_request` | `ReadOnlyAccess`, plus `s3:PutObject` / `s3:DeleteObject` on `vibratio/terraform.tfstate.tflock` in the state bucket |
+| `vibratio-github-actions-apply` | `repo:Eagle-Konbu@13817030/vibratio-infra@1401080650:ref:refs/tags/v*` | `AdministratorAccess` |
 
 Both trust policies also require `token.actions.githubusercontent.com:aud` to be `sts.amazonaws.com` (`StringEquals`).
+
+The repository uses GitHub's immutable OIDC subject, which includes the owner and repository IDs (`<owner>@<owner-id>/<repo>@<repo-id>`). A renamed or re-created repository therefore cannot assume these roles. Check the current prefix with `gh api repos/Eagle-Konbu/vibratio-infra/actions/oidc/customization/sub`.
 
 ### CI/CD
 
@@ -182,10 +208,12 @@ terraform providers lock -platform=linux_amd64 -platform=darwin_arm64
 
 ### After the First Apply
 
-1. Set the external API credentials (`batch_secret_parameter_names` output):
+1. Set the external API credentials and the Discord webhook URL (`batch_secret_parameter_names` output):
 
    ```sh
    aws ssm put-parameter --name /vibratio/batch/llm-api-key --type SecureString --overwrite --value '<value>'
+   aws ssm put-parameter --name /vibratio/batch/tts-api-key --type SecureString --overwrite --value '<value>'
+   aws ssm put-parameter --name /vibratio/batch/discord-webhook-url --type SecureString --overwrite --value '<value>'
    ```
 
 2. Create the CMS user:
@@ -212,7 +240,6 @@ Logs:
 | Component | Log group |
 | --- | --- |
 | Batch | `/aws/lambda/vibratio-batch` |
-| BFF | `/aws/lambda/vibratio-bff` |
 | AppSync (errors only) | `/aws/appsync/apis/<api-id>` |
 
 ## Estimated Cost
@@ -221,11 +248,12 @@ Rough monthly estimate in `ap-northeast-1` for one batch per day and a single CM
 
 | Service | Assumption | Monthly |
 | --- | --- | --- |
-| Lambda | 30 runs × up to 15 min × 512 MB ≈ 13,500 GB-s, plus BFF calls | $0 (within the always-free 400,000 GB-s) |
+| Lambda | 30 runs × up to 15 min × 512 MB ≈ 13,500 GB-s | $0 (within the always-free 400,000 GB-s) |
 | EventBridge Scheduler | 30 invocations | $0 (within the 14M free invocations) |
 | S3 | ~10 MB of audio per episode, growing ~0.3 GB per month | < $0.10 |
 | AppSync | A few thousand requests | < $0.05 |
-| CloudFront | A few MB of transfer | $0 (within the always-free tier) |
+| DynamoDB | On-demand, a few thousand requests, < 1 MB stored, point-in-time recovery | < $0.01 |
+| CloudFront | CMS assets and ~0.3 GB of audio downloads | $0 (within the always-free 1 TB) |
 | Cognito | 1 MAU | $0 (within the free MAU) |
 | CloudWatch Logs | < 1 GB ingestion | $0 (within the 5 GB free tier) |
 | SSM Parameter Store | Standard parameters | $0 |

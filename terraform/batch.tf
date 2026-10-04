@@ -16,6 +16,8 @@ resource "aws_lambda_function" "batch" {
 
   environment {
     variables = {
+      AUDIO_BASE_URL         = "https://${aws_cloudfront_distribution.audio.domain_name}"
+      CONFIG_TABLE_NAME      = aws_dynamodb_table.config.name
       DATA_BUCKET_NAME       = aws_s3_bucket.data.bucket
       SECRETS_PARAMETER_PATH = local.batch_secrets_path
     }
@@ -70,7 +72,6 @@ data "aws_iam_policy_document" "batch" {
       test     = "StringLike"
       variable = "s3:prefix"
       values = [
-        "${local.data_prefixes.sources}*",
         "${local.data_prefixes.articles}*",
         "${local.data_prefixes.episodes}*",
       ]
@@ -78,12 +79,9 @@ data "aws_iam_policy_document" "batch" {
   }
 
   statement {
-    sid     = "ReadSourcesAndConfig"
-    actions = ["s3:GetObject"]
-    resources = [
-      "${aws_s3_bucket.data.arn}/${local.data_prefixes.sources}*",
-      "${aws_s3_bucket.data.arn}/${local.data_prefixes.config}*",
-    ]
+    sid       = "ReadConfig"
+    actions   = ["dynamodb:Query", "dynamodb:GetItem"]
+    resources = [aws_dynamodb_table.config.arn]
   }
 
   statement {

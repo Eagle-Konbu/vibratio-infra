@@ -1,5 +1,5 @@
-# Initial CMS-facing schema. It is a view for the CMS, not a mirror of the backend domain model.
-# Every Query/Mutation field is resolved by the BFF Lambda (see bff_resolver_fields in api.tf).
+# CMS-facing schema. The CMS only edits settings, which are stored in the config DynamoDB table.
+# Every Query/Mutation field is resolved by graphql/resolvers/<Type>.<field>.js.
 
 enum SourceType {
   RSS
@@ -11,31 +11,8 @@ type Source {
   name: String!
   type: SourceType!
   endpoint: AWSURL!
-}
-
-type Article {
-  id: ID!
-  title: String!
-  url: AWSURL!
-  publishedAt: AWSDateTime
-}
-
-type EpisodeSummary {
-  id: ID!
-  date: AWSDate!
-}
-
-type Episode {
-  id: ID!
-  date: AWSDate!
-  script: String!
-  audioUrl: AWSURL
-  articles: [Article!]!
-}
-
-type EpisodeConnection {
-  items: [EpisodeSummary!]!
-  nextToken: String
+  createdAt: AWSDateTime!
+  updatedAt: AWSDateTime!
 }
 
 input CreateSourceInput {
@@ -53,8 +30,6 @@ input UpdateSourceInput {
 
 type Query {
   sources: [Source!]!
-  episodes(limit: Int, nextToken: String): EpisodeConnection!
-  episode(id: ID!): Episode
 }
 
 type Mutation {

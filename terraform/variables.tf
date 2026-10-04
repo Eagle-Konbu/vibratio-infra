@@ -43,5 +43,5 @@ variable "batch_memory_size_mb" {
 variable "batch_secret_names" {
   description = "Names of SecureString parameters created under /<project_name>/batch/ for external API credentials."
   type        = set(string)
-  default     = ["llm-api-key", "tts-api-key"]
+  default     = ["llm-api-key", "tts-api-key", "discord-webhook-url"]
 }
