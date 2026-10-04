@@ -112,7 +112,7 @@ The prefixes map one-to-one to the backend domain model, and IAM policies are sc
 
 ## Deployment
 
-`terraform plan` and `terraform apply` are run by CI/CD. The steps below are the one-time setup and the commands CI runs.
+`terraform plan` and `terraform apply` are run by GitHub Actions. The state bucket and the GitHub Actions roles are set up once by hand.
 
 ### Prerequisites
 
@@ -130,16 +130,42 @@ aws s3api put-public-access-block --bucket "$BUCKET" \
 aws s3api put-bucket-versioning --bucket "$BUCKET" --versioning-configuration Status=Enabled
 ```
 
-### Commands
+The GitHub Actions roles are also created by hand, using the existing `token.actions.githubusercontent.com` OIDC provider. Plan and apply use separate roles so that pull requests never get write access to AWS:
+
+| Role | Trust condition (`token.actions.githubusercontent.com:sub`, `StringLike`) | Permissions |
+| --- | --- | --- |
+| `vibratio-github-actions-plan` | `repo:Eagle-Konbu/vibratio-infra:pull_request` | `ReadOnlyAccess`, plus `s3:PutObject` / `s3:DeleteObject` on `vibratio/terraform.tfstate.tflock` in the state bucket |
+| `vibratio-github-actions-apply` | `repo:Eagle-Konbu/vibratio-infra:ref:refs/tags/v*` | `AdministratorAccess` |
+
+Both trust policies also require `token.actions.githubusercontent.com:aud` to be `sts.amazonaws.com` (`StringEquals`).
+
+### CI/CD
+
+| Workflow | Trigger | Steps |
+| --- | --- | --- |
+| `plan.yml` | Pull request that changes `terraform/` | fmt check, validate, plan, and a plan comment on the pull request |
+| `deploy.yml` | Push of a `v*.*.*` tag | plan and apply |
+
+Release by tagging the merged commit on `main`:
 
 ```sh
-cd terraform
-terraform init -backend-config="bucket=vibratio-tfstate-<account-id>"
-terraform plan -out=tfplan
-terraform apply tfplan
+git tag v0.1.0
+git push origin v0.1.0
 ```
 
-For validation without access to the state:
+Repository secrets:
+
+| Secret | Value |
+| --- | --- |
+| `AWS_PLAN_ROLE_ARN` | ARN of the plan role |
+| `AWS_APPLY_ROLE_ARN` | ARN of the apply role |
+| `TF_STATE_BUCKET` | Name of the state bucket |
+
+This repository is public, so workflow logs and plan comments are public too. They contain resource ARNs, including the AWS account ID, but no credentials. Pull requests from forks receive neither secrets nor OIDC tokens, so their plan job fails without touching AWS.
+
+### Local Validation
+
+`terraform plan` and `terraform apply` are not run locally. To validate without access to the state:
 
 ```sh
 terraform fmt -check -recursive
