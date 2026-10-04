@@ -45,3 +45,9 @@ variable "batch_secret_names" {
   type        = set(string)
   default     = ["llm-api-key", "tts-api-key", "discord-webhook-url"]
 }
+
+variable "domain_name" {
+  description = "Parent domain of the custom domains (cms, audio, api). Its DNS is managed outside AWS."
+  type        = string
+  default     = "vibratio.cl17.dev"
+}

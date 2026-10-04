@@ -52,3 +52,14 @@ output "cms_url" {
   description = "URL of the CMS."
   value       = "https://${aws_cloudfront_distribution.cms.domain_name}"
 }
+
+output "acm_validation_records" {
+  description = "DNS records to add to Cloudflare to validate and renew the ACM certificate."
+  value = [
+    for option in aws_acm_certificate.wildcard.domain_validation_options : {
+      name  = option.resource_record_name
+      type  = option.resource_record_type
+      value = option.resource_record_value
+    }
+  ]
+}
