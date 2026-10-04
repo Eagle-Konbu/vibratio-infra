@@ -16,7 +16,7 @@ resource "aws_lambda_function" "batch" {
 
   environment {
     variables = {
-      AUDIO_BASE_URL         = "https://${aws_cloudfront_distribution.audio.domain_name}"
+      AUDIO_BASE_URL         = local.audio_base_url
       CONFIG_TABLE_NAME      = aws_dynamodb_table.config.name
       DATA_BUCKET_NAME       = aws_s3_bucket.data.bucket
       SECRETS_PARAMETER_PATH = local.batch_secrets_path

@@ -37,6 +37,7 @@ resource "aws_cloudfront_origin_access_control" "data" {
 resource "aws_cloudfront_distribution" "audio" {
   enabled = true
   comment = "${var.project_name} audio"
+  aliases = [local.audio_domain_name]
   # PriceClass_200 is the cheapest class that includes edge locations in Japan.
   price_class     = "PriceClass_200"
   http_version    = "http2and3"
@@ -65,6 +66,8 @@ resource "aws_cloudfront_distribution" "audio" {
   }
 
   viewer_certificate {
-    cloudfront_default_certificate = true
+    acm_certificate_arn      = aws_acm_certificate_validation.wildcard.certificate_arn
+    ssl_support_method       = "sni-only"
+    minimum_protocol_version = "TLSv1.2_2021"
   }
 }
