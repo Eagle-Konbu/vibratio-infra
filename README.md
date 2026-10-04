@@ -31,7 +31,7 @@ scripts/
 └── test-resolvers.sh  # Runs the resolver tests with `aws appsync evaluate-code`
 terraform/
 ├── .tflint.hcl        # TFLint rulesets (terraform recommended, AWS)
-├── versions.tf        # Terraform/provider versions, S3 backend, provider config
+├── versions.tf        # Terraform/provider versions, S3 backend, provider config (incl. us-east-1 alias)
 ├── variables.tf       # Tunable settings (region, schedule, retention, ...)
 ├── main.tf            # Shared data sources and the Lambda placeholder package
 ├── storage.tf         # S3 data bucket and its key prefixes
@@ -42,6 +42,7 @@ terraform/
 ├── audio_delivery.tf  # CloudFront for audio/ in the data bucket
 ├── auth.tf            # Cognito User Pool and CMS app client
 ├── cms_hosting.tf     # S3 + CloudFront for the CMS
+├── domain.tf          # ACM wildcard certificate for the custom domains (us-east-1)
 ├── outputs.tf         # Values consumed by backend/CMS deployments
 └── graphql/
     ├── schema.graphql # CMS-facing GraphQL schema
@@ -148,7 +149,7 @@ The prefixes map one-to-one to the backend domain model, and IAM policies are sc
 - **AppSync JS resolvers instead of a BFF Lambda.** The CMS only performs CRUD on settings, so resolvers map GraphQL fields to DynamoDB operations directly. Type and URL checks come from the schema (`AWSURL`, enums). If validation grows beyond what a resolver should do, a Lambda data source can be added for those fields.
 - **Cognito without self sign-up.** The CMS is for personal use; users are created by an administrator. TOTP MFA is available as an option.
 - **Audio is delivered as a public CloudFront URL.** The batch posts the URL to Discord, and Discord messages remain, so the URL must not expire; presigned URLs expire within hours when signed with Lambda role credentials. CloudFront reads only `audio/` through origin access control, and unguessable object keys keep the files from being enumerated. If the files must be restricted, CloudFront signed URLs with a long expiry can be added later. The CMS and the API have no access to the data bucket.
-- **CloudFront default domain.** A custom domain can be added later with an ACM certificate in `us-east-1`.
+- **Custom domains under `vibratio.cl17.dev` with DNS on Cloudflare.** One wildcard ACM certificate (`*.vibratio.cl17.dev`) in `us-east-1`, as CloudFront and AppSync require, covers `cms`, `audio` and `api`. DNS is not moved to Route 53, so the validation records are added to Cloudflare by hand. Terraform does not wait for validation (`aws_acm_certificate_validation`) or attach the certificate until it is issued, because CI would otherwise block until the records exist and time out.
 
 ## Deployment
 
@@ -243,7 +244,24 @@ terraform providers lock -platform=linux_amd64 -platform=darwin_arm64
      --user-attributes Name=email,Value=<email> Name=email_verified,Value=true
    ```
 
-3. Deploy the backend Lambda code and the CMS as described in [Boundaries](#boundaries).
+3. Validate the ACM certificate by adding its DNS records to Cloudflare (`cl17.dev` → DNS → Records):
+
+   ```sh
+   terraform -chdir=terraform output acm_validation_records
+   ```
+
+   - Add each record as a CNAME with Proxy status **DNS only** (grey cloud); ACM cannot validate proxied records.
+   - Cloudflare strips the trailing `.cl17.dev` from the name, so check the displayed name after saving.
+   - If `cl17.dev` has CAA records, add `0 issue "amazon.com"` and `0 issuewild "amazon.com"`.
+   - Keep the records; ACM uses them to renew the certificate.
+
+   Confirm that the certificate is `ISSUED`:
+
+   ```sh
+   AWS_REGION=us-east-1 aws acm list-certificates --query "CertificateSummaryList[?DomainName=='*.vibratio.cl17.dev']"
+   ```
+
+4. Deploy the backend Lambda code and the CMS as described in [Boundaries](#boundaries).
 
 ## Operations
 
@@ -275,6 +293,7 @@ Rough monthly estimate in `ap-northeast-1` for one batch per day and a single CM
 | Cognito | 1 MAU | $0 (within the free MAU) |
 | CloudWatch Logs | < 1 GB ingestion | $0 (within the 5 GB free tier) |
 | SSM Parameter Store | Standard parameters | $0 |
+| ACM | Public certificate | $0 |
 | Terraform state bucket | A few KB | < $0.01 |
 | **Total** | | **< $1** |
 
