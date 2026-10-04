@@ -1,0 +1,44 @@
+# CMS-facing schema. The CMS only edits settings, which are stored in the config DynamoDB table.
+# Every Query/Mutation field is resolved by graphql/resolvers/<Type>.<field>.js.
+
+enum SourceType {
+  RSS
+  ATOM
+}
+
+type Source {
+  id: ID!
+  name: String!
+  type: SourceType!
+  endpoint: AWSURL!
+  createdAt: AWSDateTime!
+  updatedAt: AWSDateTime!
+}
+
+input CreateSourceInput {
+  name: String!
+  type: SourceType!
+  endpoint: AWSURL!
+}
+
+input UpdateSourceInput {
+  id: ID!
+  name: String
+  type: SourceType
+  endpoint: AWSURL
+}
+
+type Query {
+  sources: [Source!]!
+}
+
+type Mutation {
+  createSource(input: CreateSourceInput!): Source!
+  updateSource(input: UpdateSourceInput!): Source!
+  deleteSource(id: ID!): ID!
+}
+
+schema {
+  query: Query
+  mutation: Mutation
+}

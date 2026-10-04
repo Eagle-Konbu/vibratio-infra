@@ -1,0 +1,53 @@
+[
+  {
+    "name": "queries all sources",
+    "function": "request",
+    "context": {},
+    "expected": {
+      "operation": "Query",
+      "query": {
+        "expression": "pk = :pk",
+        "expressionValues": { ":pk": { "S": "SOURCE" } }
+      }
+    }
+  },
+  {
+    "name": "uses the sort key as the source ID",
+    "function": "response",
+    "context": {
+      "result": {
+        "items": [
+          {
+            "pk": "SOURCE",
+            "sk": "source-1",
+            "name": "Example",
+            "type": "RSS",
+            "endpoint": "https://example.com/feed.xml",
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "updatedAt": "2026-01-02T00:00:00.000Z"
+          }
+        ]
+      }
+    },
+    "expected": [
+      {
+        "pk": "SOURCE",
+        "sk": "source-1",
+        "id": "source-1",
+        "name": "Example",
+        "type": "RSS",
+        "endpoint": "https://example.com/feed.xml",
+        "createdAt": "2026-01-01T00:00:00.000Z",
+        "updatedAt": "2026-01-02T00:00:00.000Z"
+      }
+    ]
+  },
+  {
+    "name": "propagates a data source error",
+    "function": "response",
+    "context": {
+      "error": { "message": "Requested resource not found", "type": "DynamoDB:ResourceNotFoundException" }
+    },
+    "expectedError": "Requested resource not found"
+  }
+]

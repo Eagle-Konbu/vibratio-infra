@@ -1,0 +1,27 @@
+[
+  {
+    "name": "deletes an existing source",
+    "function": "request",
+    "context": { "arguments": { "id": "source-1" } },
+    "expected": {
+      "operation": "DeleteItem",
+      "key": { "pk": { "S": "SOURCE" }, "sk": { "S": "source-1" } },
+      "condition": { "expression": "attribute_exists(pk)" }
+    }
+  },
+  {
+    "name": "returns the deleted source ID",
+    "function": "response",
+    "context": { "arguments": { "id": "source-1" }, "result": {} },
+    "expected": "source-1"
+  },
+  {
+    "name": "rejects a missing source",
+    "function": "response",
+    "context": {
+      "arguments": { "id": "source-1" },
+      "error": { "message": "The conditional request failed", "type": "DynamoDB:ConditionalCheckFailedException" }
+    },
+    "expectedError": "The conditional request failed"
+  }
+]
