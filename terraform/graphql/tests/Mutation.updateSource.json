@@ -1,0 +1,55 @@
+[
+  {
+    "name": "updates only the given fields of an existing source",
+    "function": "request",
+    "context": {
+      "arguments": {
+        "input": { "id": "source-1", "name": "Renamed", "type": null }
+      }
+    },
+    "ignore": [["update", "expressionValues", ":updatedAt"]],
+    "expected": {
+      "operation": "UpdateItem",
+      "key": { "pk": { "S": "SOURCE" }, "sk": { "S": "source-1" } },
+      "update": {
+        "expression": "SET #name = :name, #updatedAt = :updatedAt",
+        "expressionNames": { "#name": "name", "#updatedAt": "updatedAt" },
+        "expressionValues": { ":name": { "S": "Renamed" } }
+      },
+      "condition": { "expression": "attribute_exists(pk)" }
+    }
+  },
+  {
+    "name": "uses the sort key as the source ID",
+    "function": "response",
+    "context": {
+      "result": {
+        "pk": "SOURCE",
+        "sk": "source-1",
+        "name": "Renamed",
+        "type": "RSS",
+        "endpoint": "https://example.com/feed.xml",
+        "createdAt": "2026-01-01T00:00:00.000Z",
+        "updatedAt": "2026-01-02T00:00:00.000Z"
+      }
+    },
+    "expected": {
+      "pk": "SOURCE",
+      "sk": "source-1",
+      "id": "source-1",
+      "name": "Renamed",
+      "type": "RSS",
+      "endpoint": "https://example.com/feed.xml",
+      "createdAt": "2026-01-01T00:00:00.000Z",
+      "updatedAt": "2026-01-02T00:00:00.000Z"
+    }
+  },
+  {
+    "name": "rejects a missing source",
+    "function": "response",
+    "context": {
+      "error": { "message": "The conditional request failed", "type": "DynamoDB:ConditionalCheckFailedException" }
+    },
+    "expectedError": "The conditional request failed"
+  }
+]

@@ -1,0 +1,59 @@
+[
+  {
+    "name": "puts a new source with a generated ID and timestamps",
+    "function": "request",
+    "context": {
+      "arguments": {
+        "input": { "name": "Example", "type": "RSS", "endpoint": "https://example.com/feed.xml" }
+      }
+    },
+    "ignore": [
+      ["key", "sk"],
+      ["attributeValues", "createdAt"],
+      ["attributeValues", "updatedAt"]
+    ],
+    "expected": {
+      "operation": "PutItem",
+      "key": { "pk": { "S": "SOURCE" } },
+      "attributeValues": {
+        "name": { "S": "Example" },
+        "type": { "S": "RSS" },
+        "endpoint": { "S": "https://example.com/feed.xml" }
+      },
+      "condition": { "expression": "attribute_not_exists(pk)" }
+    }
+  },
+  {
+    "name": "uses the sort key as the source ID",
+    "function": "response",
+    "context": {
+      "result": {
+        "pk": "SOURCE",
+        "sk": "source-1",
+        "name": "Example",
+        "type": "RSS",
+        "endpoint": "https://example.com/feed.xml",
+        "createdAt": "2026-01-01T00:00:00.000Z",
+        "updatedAt": "2026-01-01T00:00:00.000Z"
+      }
+    },
+    "expected": {
+      "pk": "SOURCE",
+      "sk": "source-1",
+      "id": "source-1",
+      "name": "Example",
+      "type": "RSS",
+      "endpoint": "https://example.com/feed.xml",
+      "createdAt": "2026-01-01T00:00:00.000Z",
+      "updatedAt": "2026-01-01T00:00:00.000Z"
+    }
+  },
+  {
+    "name": "propagates a data source error",
+    "function": "response",
+    "context": {
+      "error": { "message": "The conditional request failed", "type": "DynamoDB:ConditionalCheckFailedException" }
+    },
+    "expectedError": "The conditional request failed"
+  }
+]

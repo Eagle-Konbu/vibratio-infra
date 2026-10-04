@@ -27,7 +27,10 @@ All logs go to CloudWatch Logs with a fixed retention period.
 ## Directory Layout
 
 ```text
+scripts/
+└── test-resolvers.sh  # Runs the resolver tests with `aws appsync evaluate-code`
 terraform/
+├── .tflint.hcl        # TFLint rulesets (terraform recommended, AWS)
 ├── versions.tf        # Terraform/provider versions, S3 backend, provider config
 ├── variables.tf       # Tunable settings (region, schedule, retention, ...)
 ├── main.tf            # Shared data sources and the Lambda placeholder package
@@ -42,7 +45,8 @@ terraform/
 ├── outputs.tf         # Values consumed by backend/CMS deployments
 └── graphql/
     ├── schema.graphql # CMS-facing GraphQL schema
-    └── resolvers/     # APPSYNC_JS resolvers, one file per field
+    ├── resolvers/     # APPSYNC_JS resolvers, one file per field
+    └── tests/         # Resolver test cases, one file per resolver
 ```
 
 There is a single root module and a single environment. Files are split by component instead of Terraform modules, and IAM is defined next to the resource that uses it.
@@ -90,11 +94,23 @@ aws cloudfront create-invalidation --distribution-id "$(terraform output -raw cm
 
 `terraform/graphql/schema.graphql` is the CMS-facing schema, and `terraform/graphql/resolvers/<Type>.<field>.js` resolves each `Query` and `Mutation` field against the config table. Terraform registers every file in `resolvers/` as a resolver, so adding a field means adding it to the schema and adding its resolver file.
 
-Resolvers are plain JavaScript files deployed as they are, with no build step. They run on the APPSYNC_JS runtime, which supports only a subset of JavaScript (no `try`/`catch`, classes, `while` loops, ...), and can be checked on that runtime without deploying them:
+Resolvers are plain JavaScript files deployed as they are, with no build step. They run on the APPSYNC_JS runtime, which supports only a subset of JavaScript (no `try`/`catch`, classes, `while` loops, ...).
+
+#### Resolver Tests
+
+`scripts/test-resolvers.sh` runs each resolver on the APPSYNC_JS runtime with `aws appsync evaluate-code`, so the tests catch unsupported JavaScript as well as wrong DynamoDB requests. Nothing is deployed or written. Every resolver must have a test file `terraform/graphql/tests/<Type>.<field>.json` with an array of cases:
+
+| Key | Description |
+| --- | --- |
+| `name` | Description of the case |
+| `function` | `request` or `response` |
+| `context` | AppSync context passed to the function (`arguments`, `result`, `error`, ...) |
+| `expected` | Expected return value |
+| `ignore` | Optional paths removed from the return value before comparing, for generated IDs and timestamps (e.g. `[["key", "sk"]]`) |
+| `expectedError` | Expected error message, instead of `expected` |
 
 ```sh
-aws appsync evaluate-code --runtime name=APPSYNC_JS,runtimeVersion=1.0.0 \
-  --code file://graphql/resolvers/Query.sources.js --function request --context '{}'
+./scripts/test-resolvers.sh   # requires AWS credentials with appsync:EvaluateCode
 ```
 
 ## Data Model
@@ -158,7 +174,7 @@ The GitHub Actions roles are also created by hand, using the existing `token.act
 
 | Role | Trust condition (`token.actions.githubusercontent.com:sub`, `StringLike`) | Permissions |
 | --- | --- | --- |
-| `vibratio-github-actions-plan` | `repo:Eagle-Konbu@13817030/vibratio-infra@1401080650:pull_request` | `ReadOnlyAccess`, plus `s3:PutObject` / `s3:DeleteObject` on `vibratio/terraform.tfstate.tflock` in the state bucket |
+| `vibratio-github-actions-plan` | `repo:Eagle-Konbu@13817030/vibratio-infra@1401080650:pull_request` | `ReadOnlyAccess`, plus `s3:PutObject` / `s3:DeleteObject` on `vibratio/terraform.tfstate.tflock` in the state bucket, and `appsync:EvaluateCode` for the resolver tests |
 | `vibratio-github-actions-apply` | `repo:Eagle-Konbu@13817030/vibratio-infra@1401080650:ref:refs/tags/v*` | `AdministratorAccess` |
 
 Both trust policies also require `token.actions.githubusercontent.com:aud` to be `sts.amazonaws.com` (`StringEquals`).
@@ -169,7 +185,7 @@ The repository uses GitHub's immutable OIDC subject, which includes the owner an
 
 | Workflow | Trigger | Steps |
 | --- | --- | --- |
-| `plan.yml` | Pull request that changes `terraform/` | fmt check, validate, plan, and a plan comment on the pull request |
+| `ci.yml` | Pull request that changes `terraform/` | TFLint, resolver tests, and fmt check, validate, plan with a plan comment on the pull request (jobs run in parallel) |
 | `deploy.yml` | Push of a `v*.*.*` tag | plan and apply |
 
 Release by tagging the merged commit on `main`:
@@ -197,7 +213,9 @@ This repository is public, so workflow logs and plan comments are public too. Th
 terraform fmt -check -recursive
 terraform init -backend=false
 terraform validate
+tflint --init
 tflint
+../scripts/test-resolvers.sh
 ```
 
 `.terraform.lock.hcl` contains provider hashes for `linux_amd64` and `darwin_arm64`. After upgrading providers, refresh it with:
