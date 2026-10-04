@@ -86,8 +86,8 @@ All resources are in `ap-northeast-1`.
 Deploy the build output and invalidate the cache:
 
 ```sh
-aws s3 sync dist "s3://$(terraform output -raw cms_bucket_name)" --delete
-aws cloudfront create-invalidation --distribution-id "$(terraform output -raw cms_distribution_id)" --paths "/*"
+aws s3 sync dist "s3://$(terraform -chdir=terraform output -raw cms_bucket_name)" --delete
+aws cloudfront create-invalidation --distribution-id "$(terraform -chdir=terraform output -raw cms_distribution_id)" --paths "/*"
 ```
 
 ### GraphQL API
@@ -144,7 +144,7 @@ The prefixes map one-to-one to the backend domain model, and IAM policies are sc
 - **Settings in DynamoDB, generated data in S3.** Settings are small records edited one at a time, which fits DynamoDB (conditional writes, `Query` instead of list-then-get). Articles, episodes and audio are written once a day and audio is large, which fits S3. The config table has point-in-time recovery and deletion protection because it is the only copy of the settings. The data bucket is versioned because regenerating episodes calls paid APIs again; noncurrent versions expire after 30 days.
 - **Lambda code is deployed outside Terraform.** Terraform owns the function configuration, the backend CI owns the code. This keeps application releases independent from infrastructure changes.
 - **No automatic retry of the batch.** Retries would call the paid LLM and TTS APIs again, so a failed run is re-executed manually (see Operations).
-- **SSM Parameter Store instead of Secrets Manager.** Standard SecureString parameters are free and rotation is not needed. Terraform creates the parameters with a placeholder value and ignores the value afterwards, so real credentials never enter the Terraform state.
+- **SSM Parameter Store instead of Secrets Manager.** Standard SecureString parameters are free and rotation is not needed. Terraform creates the parameters with a write-only placeholder value (`value_wo`) and never reads the value back, so real credentials never enter the Terraform state.
 - **AppSync JS resolvers instead of a BFF Lambda.** The CMS only performs CRUD on settings, so resolvers map GraphQL fields to DynamoDB operations directly. Type and URL checks come from the schema (`AWSURL`, enums). If validation grows beyond what a resolver should do, a Lambda data source can be added for those fields.
 - **Cognito without self sign-up.** The CMS is for personal use; users are created by an administrator. TOTP MFA is available as an option.
 - **Audio is delivered as a public CloudFront URL.** The batch posts the URL to Discord, and Discord messages remain, so the URL must not expire; presigned URLs expire within hours when signed with Lambda role credentials. CloudFront reads only `audio/` through origin access control, and unguessable object keys keep the files from being enumerated. If the files must be restricted, CloudFront signed URLs with a long expiry can be added later. The CMS and the API have no access to the data bucket.
@@ -207,7 +207,7 @@ This repository is public, so workflow logs and plan comments are public too. Th
 
 ### Local Validation
 
-`terraform plan` and `terraform apply` are not run locally. To validate without access to the state:
+`terraform plan` and `terraform apply` are not run locally. To validate without access to the state, run in `terraform/`:
 
 ```sh
 terraform fmt -check -recursive
@@ -238,7 +238,7 @@ terraform providers lock -platform=linux_amd64 -platform=darwin_arm64
 
    ```sh
    aws cognito-idp admin-create-user \
-     --user-pool-id "$(terraform output -raw cognito_user_pool_id)" \
+     --user-pool-id "$(terraform -chdir=terraform output -raw cognito_user_pool_id)" \
      --username <email> \
      --user-attributes Name=email,Value=<email> Name=email_verified,Value=true
    ```
